@@ -35,8 +35,8 @@ Built with **Svelte + Vite + Tailwind CSS + TypeScript**.
 ## Quick start
 
 ```bash
-npm install
-npm run dev
+pnpm install
+pnpm dev
 ```
 
 Open the local URL Vite prints (usually `http://localhost:5173`).
@@ -46,13 +46,36 @@ Open the local URL Vite prints (usually `http://localhost:5173`).
 ## Build
 
 ```bash
-npm run build
-npm run preview
+pnpm build
+pnpm preview
 ```
 
 ---
 
 ## Data input guidance
+
+### Optional local auto-import command
+
+If you want this UI to auto-load local data on startup (without manual file picking), run:
+
+```bash
+pnpm generate:local
+```
+
+This command scans common local paths for ProfileX/Codex/Claude data, normalizes it, and writes:
+
+- `public/local-unified-usage.json`
+
+You can run a broader home-directory scan with:
+
+```bash
+pnpm generate:local:deep
+```
+
+On app boot, the UI checks for `public/local-unified-usage.json`:
+
+- If present: it auto-loads events and profile mappings.
+- If missing: it stays in manual upload mode and shows a command hint.
 
 ### ProfileX state
 

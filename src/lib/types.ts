@@ -95,3 +95,21 @@ export type ToolSummary = {
   totalCostUSD: number;
   activeProfiles: number;
 };
+
+export type UnifiedSourceSummary = {
+  profilexStatePath: string | null;
+  usageRoots: string[];
+  usageFiles: string[];
+};
+
+export type UnifiedLocalBundle = {
+  schemaVersion: 1;
+  generatedAtUtc: string;
+  timezone: string;
+  costMode: 'auto' | 'calculate' | 'display';
+  pricingLoaded: boolean;
+  profilexState: ProfilexState | null;
+  events: NormalizedEvent[];
+  source: UnifiedSourceSummary;
+  notes: string[];
+};

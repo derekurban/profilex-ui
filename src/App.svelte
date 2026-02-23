@@ -1,9 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { aggregateDailyProfile, aggregateProfileSummary, aggregateToolSummary, overallTotals } from './lib/aggregate';
   import { parseUsageFile } from './lib/parsers';
   import { parseProfilexState, ProfileResolver } from './lib/profilex';
   import { loadPricingCatalog } from './lib/pricing';
-  import type { NormalizedEvent, ProfilexState, Tool } from './lib/types';
+  import type { NormalizedEvent, ProfilexState, Tool, UnifiedLocalBundle } from './lib/types';
 
   let timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
   let costMode: 'auto' | 'calculate' | 'display' = 'auto';
@@ -13,9 +14,11 @@
   let pricingLoaded = false;
   let pricingStatus = 'Not loaded';
   let pricingEntries = 0;
+  let localBundleStatus = 'Not checked';
 
   let events: NormalizedEvent[] = [];
   let importLog: string[] = [];
+  const LOCAL_UNIFIED_PATH = '/local-unified-usage.json';
 
   const fmtNum = (n: number) => new Intl.NumberFormat().format(Math.round(n));
   const fmtUSD = (n: number) =>
@@ -27,6 +30,107 @@
 
   function log(message: string) {
     importLog = [message, ...importLog].slice(0, 80);
+  }
+
+  function isUnifiedLocalBundle(value: unknown): value is UnifiedLocalBundle {
+    if (!value || typeof value !== 'object') return false;
+    const bundle = value as Partial<UnifiedLocalBundle>;
+    return Array.isArray(bundle.events) && Array.isArray(bundle.notes) && !!bundle.source;
+  }
+
+  async function onLoadLocalUnified() {
+    localBundleStatus = 'Checking local unified file...';
+    try {
+      const response = await fetch(`${LOCAL_UNIFIED_PATH}?t=${Date.now()}`, { cache: 'no-store' });
+      if (response.status === 404) {
+        localBundleStatus = 'No local unified file found. Run `pnpm generate:local`, then refresh or use manual imports.';
+        log(localBundleStatus);
+        return;
+      }
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      const payload = (await response.json()) as unknown;
+      if (!isUnifiedLocalBundle(payload)) {
+        throw new Error('Invalid local unified file format');
+      }
+
+      events = [...payload.events].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
+      if (payload.profilexState) {
+        profilexState = payload.profilexState;
+      }
+      if (payload.pricingLoaded) {
+        pricingLoaded = true;
+        pricingStatus = 'Loaded via local unified file';
+      }
+
+      localBundleStatus = `Auto-loaded ${payload.events.length} events from local unified file`;
+      log(localBundleStatus);
+    } catch (error) {
+      localBundleStatus = `Local unified load failed: ${(error as Error).message}`;
+      log(localBundleStatus);
+    }
+  }
+
+  function isUsageFile(file: File): boolean {
+    return file.name.toLowerCase().endsWith('.jsonl');
+  }
+
+  async function importUsageFiles(files: File[]) {
+    if (files.length === 0) {
+      log('No files selected');
+      return;
+    }
+
+    const usageFiles = files.filter(isUsageFile);
+    if (usageFiles.length === 0) {
+      log('No .jsonl usage files found in selection');
+      return;
+    }
+
+    if (usageFiles.length !== files.length) {
+      log(`Skipping ${files.length - usageFiles.length} non-.jsonl file(s)`);
+    }
+
+    const pricingCatalog = ((window as any).__pricingCatalog ?? null) as any;
+    if (!pricingCatalog) {
+      log('Tip: Load pricing first for calculated costs');
+    }
+
+    const resolver = new ProfileResolver(profilexState);
+    const imported: NormalizedEvent[] = [];
+
+    for (const file of usageFiles) {
+      try {
+        const text = await file.text();
+        const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
+
+        const parsedRows = parseUsageFile({
+          fileText: text,
+          filePath,
+          options: {
+            timezone,
+            costMode,
+            toolHint,
+            pricingCatalog,
+            profileResolver: resolver,
+          },
+        });
+
+        imported.push(...parsedRows);
+        if (parsedRows.length === 0) {
+          log(`Parsed 0 events from ${filePath} (check tool hint or file format)`);
+        } else {
+          log(`Imported ${parsedRows.length} events from ${filePath}`);
+        }
+      } catch (error) {
+        log(`Failed ${file.name}: ${(error as Error).message}`);
+      }
+    }
+
+    events = [...events, ...imported].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
+    log(`Total events: ${events.length}`);
   }
 
   async function onLoadPricing() {
@@ -62,42 +166,7 @@
   async function onUsageFilesUpload(ev: Event) {
     const input = ev.target as HTMLInputElement;
     const files = [...(input.files ?? [])];
-    if (files.length === 0) return;
-
-    const pricingCatalog = ((window as any).__pricingCatalog ?? null) as any;
-    if (!pricingCatalog) {
-      log('Tip: Load pricing first for calculated costs');
-    }
-
-    const resolver = new ProfileResolver(profilexState);
-    const imported: NormalizedEvent[] = [];
-
-    for (const file of files) {
-      try {
-        const text = await file.text();
-        const filePath = (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name;
-
-        const parsedRows = parseUsageFile({
-          fileText: text,
-          filePath,
-          options: {
-            timezone,
-            costMode,
-            toolHint,
-            pricingCatalog,
-            profileResolver: resolver,
-          },
-        });
-
-        imported.push(...parsedRows);
-        log(`Imported ${parsedRows.length} events from ${filePath}`);
-      } catch (error) {
-        log(`Failed ${file.name}: ${(error as Error).message}`);
-      }
-    }
-
-    events = [...events, ...imported].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
-    log(`Total events: ${events.length}`);
+    await importUsageFiles(files);
     input.value = '';
   }
 
@@ -116,6 +185,10 @@
   $: profileRows = aggregateProfileSummary(events);
   $: toolRows = aggregateToolSummary(events);
   $: totals = overallTotals(events);
+
+  onMount(() => {
+    void onLoadLocalUnified();
+  });
 </script>
 
 <div class="min-h-screen bg-slate-950 text-slate-100">
@@ -168,9 +241,28 @@
           </label>
 
           <label class="text-xs text-slate-300">
-            Upload usage files (JSONL)
-            <input class="mt-1 block w-full text-xs" type="file" multiple on:change={onUsageFilesUpload} />
+            Upload usage files (.jsonl)
+            <input class="mt-1 block w-full text-xs" type="file" multiple accept=".jsonl" on:change={onUsageFilesUpload} />
           </label>
+
+          <label class="text-xs text-slate-300 md:col-span-2">
+            Upload usage folder (imports nested .jsonl files)
+            <input
+              class="mt-1 block w-full text-xs"
+              type="file"
+              multiple
+              webkitdirectory
+              on:change={onUsageFilesUpload}
+            />
+          </label>
+        </div>
+
+        <div class="mt-3 rounded-md border border-slate-800 bg-slate-950/60 p-2 text-[11px] text-slate-400">
+          <p>{localBundleStatus}</p>
+          <p class="mt-1">To create local auto-load data, run <code>pnpm generate:local</code> in this repo.</p>
+          <button class="mt-2 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700" on:click={onLoadLocalUnified}>
+            Reload local unified file
+          </button>
         </div>
 
         <div class="mt-3 flex items-center gap-2">

@@ -38,7 +38,7 @@ function toDateLabel(ts: string, timezone: string): string {
 
 function safeParse(line: string): JsonLike | null {
   try {
-    const parsed = JSON.parse(line);
+    const parsed = JSON.parse(line.replace(/^\uFEFF/, ''));
     return parsed && typeof parsed === 'object' ? (parsed as JsonLike) : null;
   } catch {
     return null;
@@ -48,9 +48,33 @@ function safeParse(line: string): JsonLike | null {
 function detectLineTool(obj: JsonLike): Tool {
   const type = String(obj.type ?? '');
   const payload = (obj.payload ?? {}) as JsonLike;
-  if (type === 'event_msg' && String(payload.type ?? '') === 'token_count') return 'codex';
+  if (type === 'session_meta' || type === 'turn_context' || type === 'response_item') return 'codex';
+  if (type === 'event_msg') {
+    const payloadType = String(payload.type ?? '');
+    if (
+      payloadType === 'token_count' ||
+      payloadType === 'user_message' ||
+      payloadType === 'agent_message' ||
+      payloadType === 'agent_reasoning'
+    ) {
+      return 'codex';
+    }
+  }
+  const info = (payload.info ?? {}) as JsonLike;
+  if (info.total_token_usage || info.last_token_usage) return 'codex';
   if (obj.message && typeof obj.message === 'object') return 'claude';
   if (obj.requestId || obj.costUSD || obj.sessionId) return 'claude';
+  return 'unknown';
+}
+
+function detectToolFromLines(lines: string[]): Tool {
+  const maxLinesToScan = Math.min(lines.length, 50);
+  for (let i = 0; i < maxLinesToScan; i++) {
+    const obj = safeParse(lines[i]);
+    if (!obj) continue;
+    const detected = detectLineTool(obj);
+    if (detected !== 'unknown') return detected;
+  }
   return 'unknown';
 }
 
@@ -319,9 +343,8 @@ export function parseUsageFile(params: {
   const lines = fileText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) return [];
 
-  const firstObj = safeParse(lines[0]);
   const inferredFromPath = inferToolFromPath(filePath);
-  const inferredFromLine = firstObj ? detectLineTool(firstObj) : 'unknown';
+  const inferredFromLine = detectToolFromLines(lines);
   const tool = options.toolHint !== 'auto' ? options.toolHint : inferredFromLine !== 'unknown' ? inferredFromLine : inferredFromPath;
 
   const root = extractRootFromFile(filePath, tool);
