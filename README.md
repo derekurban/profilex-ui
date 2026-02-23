@@ -41,6 +41,20 @@ pnpm dev
 
 Open the local URL Vite prints (usually `http://localhost:5173`).
 
+`pnpm dev` now preflights `public/local-unified-usage.json` before Vite starts:
+
+- If the report exists, it is reused.
+- If missing, it runs `pnpm generate:local:deep` first.
+- Pass `--force-report` to regenerate even when it exists.
+- Pass `--skip-report` to skip preflight generation.
+
+Examples:
+
+```bash
+pnpm dev -- --force-report
+pnpm dev -- --skip-report
+```
+
 ---
 
 ## Build

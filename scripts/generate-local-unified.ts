@@ -14,6 +14,68 @@ type CliOptions = {
   maxFiles: number;
 };
 
+type ProgressInfo = {
+  phase: string;
+  scannedDirs: number;
+  foundFiles: number;
+  elapsedMs: number;
+};
+
+const START_TIME = Date.now();
+const IS_TTY = Boolean(process.stdout.isTTY);
+let lastProgressLength = 0;
+
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.floor(ms / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function clearProgressLine() {
+  if (!IS_TTY || lastProgressLength === 0) return;
+  process.stdout.write(`\r${' '.repeat(lastProgressLength)}\r`);
+  lastProgressLength = 0;
+}
+
+function renderProgressLine(message: string) {
+  if (!IS_TTY) return;
+  const padded = message.padEnd(Math.max(message.length, lastProgressLength), ' ');
+  process.stdout.write(`\r${padded}`);
+  lastProgressLength = padded.length;
+}
+
+function flushProgressLine() {
+  if (!IS_TTY || lastProgressLength === 0) return;
+  process.stdout.write('\n');
+  lastProgressLength = 0;
+}
+
+function logLine(message: string) {
+  clearProgressLine();
+  console.log(message);
+}
+
+function renderScanProgress(info: ProgressInfo) {
+  const elapsed = formatDuration(info.elapsedMs);
+  renderProgressLine(
+    `${info.phase} | scanned ${info.scannedDirs.toLocaleString()} dirs | found ${info.foundFiles.toLocaleString()} files | elapsed ${elapsed}`,
+  );
+}
+
+function renderParseProgress(current: number, total: number, elapsedMs: number) {
+  const width = 28;
+  const ratio = total > 0 ? Math.min(1, current / total) : 0;
+  const complete = Math.floor(width * ratio);
+  const bar = `${'#'.repeat(complete)}${'-'.repeat(width - complete)}`;
+  const percent = Math.floor(ratio * 100);
+  renderProgressLine(
+    `Parsing usage files [${bar}] ${current.toLocaleString()}/${total.toLocaleString()} (${percent}%) | elapsed ${formatDuration(elapsedMs)}`,
+  );
+}
+
 function usageAndExit(message?: string): never {
   if (message) console.error(message);
   console.log('Usage: pnpm generate:local [--deep] [--max-files <n>] [--out <path>]');
@@ -105,13 +167,17 @@ async function collectJsonlFiles(params: {
   root: string;
   onlyLikelyPaths: boolean;
   maxFiles: number;
+  phaseLabel: string;
+  onProgress?: (info: ProgressInfo) => void;
 }): Promise<string[]> {
-  const { root, onlyLikelyPaths, maxFiles } = params;
+  const { root, onlyLikelyPaths, maxFiles, phaseLabel, onProgress } = params;
   const out: string[] = [];
   const stack = [root];
+  let scannedDirs = 0;
 
   while (stack.length > 0 && out.length < maxFiles) {
     const current = stack.pop()!;
+    scannedDirs += 1;
     let entries: fs.Dirent[];
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
@@ -139,6 +205,24 @@ async function collectJsonlFiles(params: {
       if (onlyLikelyPaths && !isLikelyUsagePath(posix)) continue;
       out.push(posix);
     }
+
+    if (onProgress && scannedDirs % 100 === 0) {
+      onProgress({
+        phase: phaseLabel,
+        scannedDirs,
+        foundFiles: out.length,
+        elapsedMs: Date.now() - START_TIME,
+      });
+    }
+  }
+
+  if (onProgress) {
+    onProgress({
+      phase: phaseLabel,
+      scannedDirs,
+      foundFiles: out.length,
+      elapsedMs: Date.now() - START_TIME,
+    });
   }
 
   return out;
@@ -242,7 +326,7 @@ async function main() {
   const notes: string[] = [];
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
-  console.log('Generating unified local dataset...');
+  logLine('Generating unified local dataset...');
 
   const profilex = await loadProfilexState(notes);
   const roots = await existingRoots(getUsageRoots(profilex.state));
@@ -256,8 +340,11 @@ async function main() {
       root,
       onlyLikelyPaths: false,
       maxFiles: options.maxFiles - usageFiles.size,
+      phaseLabel: `Scanning root ${toPosixAbsolute(root)}`,
+      onProgress: renderScanProgress,
     });
     for (const file of files) usageFiles.add(file);
+    logLine(`Discovered ${usageFiles.size.toLocaleString()} candidate file(s) after scanning ${toPosixAbsolute(root)}`);
     if (usageFiles.size >= options.maxFiles) break;
   }
 
@@ -266,12 +353,16 @@ async function main() {
       root: os.homedir(),
       onlyLikelyPaths: true,
       maxFiles: options.maxFiles - usageFiles.size,
+      phaseLabel: 'Deep scanning home directory',
+      onProgress: renderScanProgress,
     });
     for (const file of deepFiles) usageFiles.add(file);
     notes.push(`Deep scan added ${deepFiles.length} candidate file(s) from home directory`);
+    logLine(`Deep scan found ${deepFiles.length.toLocaleString()} additional candidate file(s)`);
   }
 
   const usageFileList = [...usageFiles].sort();
+  logLine(`Preparing to parse ${usageFileList.length.toLocaleString()} usage file(s)`);
   const pricingCatalog = await loadPricing(notes);
   const resolver = new ProfileResolver(profilex.state);
   const events: NormalizedEvent[] = [];
@@ -305,11 +396,10 @@ async function main() {
       notes.push(`Failed to parse ${usageFile}: ${(error as Error).message}`);
     }
 
-    if ((i + 1) % 100 === 0) {
-      console.log(`Parsed ${i + 1}/${usageFileList.length} usage file(s)...`);
-    }
+    renderParseProgress(i + 1, usageFileList.length, Date.now() - START_TIME);
   }
 
+  flushProgressLine();
   events.sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
 
   notes.push(`Files with zero parsed events: ${zeroEventFiles}`);
@@ -334,8 +424,9 @@ async function main() {
   await fs.mkdir(path.dirname(options.outPath), { recursive: true });
   await fs.writeFile(options.outPath, `${JSON.stringify(bundle, null, 2)}\n`, 'utf8');
 
-  console.log(`Wrote ${events.length} event(s) from ${usageFileList.length} file(s)`);
-  console.log(`Output: ${toPosixAbsolute(options.outPath)}`);
+  logLine(`Wrote ${events.length} event(s) from ${usageFileList.length} file(s)`);
+  logLine(`Output: ${toPosixAbsolute(options.outPath)}`);
+  logLine(`Total elapsed: ${formatDuration(Date.now() - START_TIME)}`);
 }
 
 main().catch((error) => {
