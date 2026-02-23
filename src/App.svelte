@@ -299,6 +299,7 @@
               <option value="auto">auto detect</option>
               <option value="claude">force claude parser</option>
               <option value="codex">force codex parser</option>
+              <option value="openclaw">force openclaw parser</option>
             </select>
           </label>
 

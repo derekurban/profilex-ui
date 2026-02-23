@@ -4,6 +4,7 @@ A beautiful web UI for unified usage/cost analysis across:
 
 - **Claude Code** JSONL usage files
 - **Codex CLI** session JSONL files
+- **OpenClaw usage snapshots** (via `profilex usage export` ingestion)
 - **ProfileX** profile mappings (`state.json`)
 
 Built with **Svelte + Vite + Tailwind CSS + TypeScript**.

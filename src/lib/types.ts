@@ -1,4 +1,4 @@
-export type Tool = 'claude' | 'codex' | 'unknown';
+export type Tool = 'claude' | 'codex' | 'openclaw' | 'unknown';
 
 export type ProfilexProfile = {
   tool: 'claude' | 'codex';
