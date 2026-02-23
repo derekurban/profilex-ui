@@ -20,6 +20,52 @@
   let importLog: string[] = [];
   const LOCAL_UNIFIED_PATH = '/local-unified-usage.json';
 
+  function eventKey(e: NormalizedEvent): string {
+    return [
+      e.tool,
+      e.profileId,
+      e.sourceFile,
+      e.sessionId,
+      e.timestampUtc,
+      e.model,
+      e.inputTokens,
+      e.cachedInputTokens,
+      e.outputTokens,
+      e.cacheCreationTokens,
+      e.cacheReadTokens,
+      e.rawTotalTokens,
+    ].join('||');
+  }
+
+  function mergeEvents(existing: NormalizedEvent[], incoming: NormalizedEvent[]): NormalizedEvent[] {
+    const map = new Map<string, NormalizedEvent>();
+    for (const e of existing) map.set(eventKey(e), e);
+    for (const e of incoming) map.set(eventKey(e), e);
+    return [...map.values()].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
+  }
+
+  function mergeProfilexState(current: ProfilexState | null, incoming: ProfilexState | null): ProfilexState | null {
+    if (!incoming) return current;
+    if (!current) return incoming;
+
+    const mergedProfiles = [...current.profiles];
+    const seen = new Set(current.profiles.map((p) => `${p.tool}|${p.name}|${p.dir}`));
+
+    for (const p of incoming.profiles) {
+      const k = `${p.tool}|${p.name}|${p.dir}`;
+      if (!seen.has(k)) {
+        mergedProfiles.push(p);
+        seen.add(k);
+      }
+    }
+
+    return {
+      version: incoming.version ?? current.version,
+      defaults: { ...(current.defaults ?? {}), ...(incoming.defaults ?? {}) },
+      profiles: mergedProfiles,
+    };
+  }
+
   const fmtNum = (n: number) => new Intl.NumberFormat().format(Math.round(n));
   const fmtUSD = (n: number) =>
     new Intl.NumberFormat(undefined, {
@@ -56,10 +102,8 @@
         throw new Error('Invalid local unified file format');
       }
 
-      events = [...payload.events].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
-      if (payload.profilexState) {
-        profilexState = payload.profilexState;
-      }
+      events = mergeEvents(events, payload.events);
+      profilexState = mergeProfilexState(profilexState, payload.profilexState);
       if (payload.pricingLoaded) {
         pricingLoaded = true;
         pricingStatus = 'Loaded via local unified file';
@@ -129,7 +173,7 @@
       }
     }
 
-    events = [...events, ...imported].sort((a, b) => a.timestampUtc.localeCompare(b.timestampUtc));
+    events = mergeEvents(events, imported);
     log(`Total events: ${events.length}`);
   }
 
@@ -167,6 +211,38 @@
     const input = ev.target as HTMLInputElement;
     const files = [...(input.files ?? [])];
     await importUsageFiles(files);
+    input.value = '';
+  }
+
+  async function onUnifiedBundleUpload(ev: Event) {
+    const input = ev.target as HTMLInputElement;
+    const files = [...(input.files ?? [])];
+    if (files.length === 0) return;
+
+    for (const file of files) {
+      try {
+        const text = await file.text();
+        const payload = JSON.parse(text) as unknown;
+        if (!isUnifiedLocalBundle(payload)) {
+          log(`Skipped ${file.name}: not a unified bundle`);
+          continue;
+        }
+
+        events = mergeEvents(events, payload.events);
+        profilexState = mergeProfilexState(profilexState, payload.profilexState);
+
+        if (payload.pricingLoaded) {
+          pricingLoaded = true;
+          if (pricingStatus === 'Not loaded') pricingStatus = 'Loaded via imported bundle';
+        }
+
+        log(`Imported bundle ${file.name}: +${payload.events.length} events`);
+      } catch (error) {
+        log(`Failed bundle ${file.name}: ${(error as Error).message}`);
+      }
+    }
+
+    log(`Total events: ${events.length}`);
     input.value = '';
   }
 
@@ -255,11 +331,16 @@
               on:change={onUsageFilesUpload}
             />
           </label>
+
+          <label class="text-xs text-slate-300 md:col-span-2">
+            Import ProfileX usage bundle(s) (.json) from this or other machines
+            <input class="mt-1 block w-full text-xs" type="file" multiple accept="application/json,.json" on:change={onUnifiedBundleUpload} />
+          </label>
         </div>
 
         <div class="mt-3 rounded-md border border-slate-800 bg-slate-950/60 p-2 text-[11px] text-slate-400">
           <p>{localBundleStatus}</p>
-          <p class="mt-1">To create local auto-load data, run <code>pnpm generate:local</code> in this repo.</p>
+          <p class="mt-1">To create local auto-load data, run <code>profilex usage export --out ./public/local-unified-usage.json</code> (or <code>pnpm generate:local</code>).</p>
           <button class="mt-2 rounded border border-slate-700 bg-slate-800 px-2 py-1 text-[11px] text-slate-200 hover:bg-slate-700" on:click={onLoadLocalUnified}>
             Reload local unified file
           </button>

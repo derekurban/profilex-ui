@@ -14,6 +14,7 @@ Built with **Svelte + Vite + Tailwind CSS + TypeScript**.
 
 - Imports ProfileX `state.json`
 - Imports usage files (multiple JSONL files)
+- Imports ProfileX unified usage bundle JSON files (great for multi-machine aggregation)
 - Detects Claude vs Codex event formats
 - Normalizes events into one schema
 - Maps each event to profile:
@@ -76,7 +77,18 @@ If you want this UI to auto-load local data on startup (without manual file pick
 pnpm generate:local
 ```
 
-This command scans common local paths for ProfileX/Codex/Claude data, normalizes it, and writes:
+By default this uses the ProfileX CLI bridge:
+
+```bash
+profilex usage export --out ./public/local-unified-usage.json
+```
+
+If `profilex` is unavailable or fails, it falls back to the local parser/scanner logic.
+
+- Use `--no-profilex-cli` to force fallback scanner mode.
+- Set `PROFILEX_UI_SKIP_PROFILEX_CLI=1` to skip the bridge.
+
+It writes:
 
 - `public/local-unified-usage.json`
 
@@ -90,6 +102,19 @@ On app boot, the UI checks for `public/local-unified-usage.json`:
 
 - If present: it auto-loads events and profile mappings.
 - If missing: it stays in manual upload mode and shows a command hint.
+
+### Multi-machine aggregation (work laptop + desktop)
+
+1. On each machine, run:
+
+```bash
+profilex usage export --out ./local-unified-usage.<machine>.json --deep
+```
+
+2. Move those JSON files to your main machine.
+3. In ProfileX-UI, use **Import ProfileX usage bundle(s) (.json)** and select all of them.
+
+The UI merges events and profile metadata across bundles.
 
 ### ProfileX state
 

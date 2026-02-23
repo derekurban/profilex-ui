@@ -2,6 +2,7 @@ import fs from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
+import { spawnSync } from 'node:child_process';
 
 import { parseUsageFile } from '../src/lib/parsers.ts';
 import { loadPricingCatalog } from '../src/lib/pricing.ts';
@@ -12,6 +13,7 @@ type CliOptions = {
   outPath: string;
   deep: boolean;
   maxFiles: number;
+  noProfilexCli: boolean;
 };
 
 type ProgressInfo = {
@@ -78,7 +80,7 @@ function renderParseProgress(current: number, total: number, elapsedMs: number) 
 
 function usageAndExit(message?: string): never {
   if (message) console.error(message);
-  console.log('Usage: pnpm generate:local [--deep] [--max-files <n>] [--out <path>]');
+  console.log('Usage: pnpm generate:local [--deep] [--max-files <n>] [--out <path>] [--no-profilex-cli]');
   process.exit(message ? 1 : 0);
 }
 
@@ -86,6 +88,7 @@ function parseArgs(argv: string[]): CliOptions {
   let outPath = path.join(process.cwd(), 'public', 'local-unified-usage.json');
   let deep = false;
   let maxFiles = 5000;
+  let noProfilexCli = false;
 
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -93,6 +96,10 @@ function parseArgs(argv: string[]): CliOptions {
     if (arg === '--help' || arg === '-h') usageAndExit();
     if (arg === '--deep') {
       deep = true;
+      continue;
+    }
+    if (arg === '--no-profilex-cli') {
+      noProfilexCli = true;
       continue;
     }
     if (arg === '--out') {
@@ -115,7 +122,44 @@ function parseArgs(argv: string[]): CliOptions {
     usageAndExit(`Unknown argument: ${arg}`);
   }
 
-  return { outPath, deep, maxFiles };
+  return { outPath, deep, maxFiles, noProfilexCli };
+}
+
+function tryProfilexCliExport(options: CliOptions, timezone: string): boolean {
+  if (options.noProfilexCli || process.env.PROFILEX_UI_SKIP_PROFILEX_CLI === '1') {
+    return false;
+  }
+
+  const cmdArgs = [
+    'usage',
+    'export',
+    '--out',
+    options.outPath,
+    '--max-files',
+    String(options.maxFiles),
+    '--timezone',
+    timezone,
+    '--cost-mode',
+    'auto',
+  ];
+  if (options.deep) cmdArgs.push('--deep');
+
+  const result = spawnSync('profilex', cmdArgs, {
+    stdio: 'inherit',
+    env: process.env,
+  });
+
+  if (!result.error && result.status === 0) {
+    logLine(`Used profilex CLI bridge: profilex ${cmdArgs.join(' ')}`);
+    return true;
+  }
+
+  if (result.error) {
+    logLine(`profilex bridge unavailable (${result.error.message}); falling back to local parser`);
+  } else {
+    logLine(`profilex bridge failed with exit code ${result.status}; falling back to local parser`);
+  }
+  return false;
 }
 
 function expandHome(input: string): string {
@@ -327,6 +371,12 @@ async function main() {
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
 
   logLine('Generating unified local dataset...');
+
+  if (tryProfilexCliExport(options, timezone)) {
+    logLine(`Output: ${toPosixAbsolute(options.outPath)}`);
+    logLine(`Total elapsed: ${formatDuration(Date.now() - START_TIME)}`);
+    return;
+  }
 
   const profilex = await loadProfilexState(notes);
   const roots = await existingRoots(getUsageRoots(profilex.state));
