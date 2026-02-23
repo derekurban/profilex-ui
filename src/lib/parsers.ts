@@ -1,9 +1,5 @@
 import type { NormalizedEvent, PricingCatalog, Tool } from './types';
-import {
-  extractRootFromFile,
-  inferToolFromPath,
-  ProfileResolver,
-} from './profilex';
+import { extractRootFromFile, inferToolFromPath, ProfileResolver } from './profilex';
 import { calculateCostFromTokens, resolvePricing } from './pricing';
 
 type ParseOptions = {
@@ -16,10 +12,15 @@ type ParseOptions = {
 
 type JsonLike = Record<string, unknown>;
 
+type ParsedEntry = {
+  obj: JsonLike;
+  lineIndex: number;
+};
+
 function toNumber(v: unknown): number {
   if (typeof v === 'number' && Number.isFinite(v)) return v;
   if (typeof v === 'string') {
-    const n = Number(v);
+    const n = Number(v.replaceAll(',', '').trim());
     if (Number.isFinite(n)) return n;
   }
   return 0;
@@ -36,46 +37,35 @@ function toDateLabel(ts: string, timezone: string): string {
   }).format(d);
 }
 
-function safeParse(line: string): JsonLike | null {
-  try {
-    const parsed = JSON.parse(line.replace(/^\uFEFF/, ''));
-    return parsed && typeof parsed === 'object' ? (parsed as JsonLike) : null;
-  } catch {
-    return null;
-  }
-}
-
-function detectLineTool(obj: JsonLike): Tool {
-  const type = String(obj.type ?? '');
-  const payload = (obj.payload ?? {}) as JsonLike;
-  if (type === 'session_meta' || type === 'turn_context' || type === 'response_item') return 'codex';
-  if (type === 'event_msg') {
-    const payloadType = String(payload.type ?? '');
-    if (
-      payloadType === 'token_count' ||
-      payloadType === 'user_message' ||
-      payloadType === 'agent_message' ||
-      payloadType === 'agent_reasoning'
-    ) {
-      return 'codex';
+function toRecord(value: unknown): JsonLike | null {
+  if (!value) return null;
+  if (typeof value === 'object' && !Array.isArray(value)) return value as JsonLike;
+  if (typeof value === 'string') {
+    const raw = value.trim();
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) return parsed as JsonLike;
+    } catch {
+      return null;
     }
   }
-  const info = (payload.info ?? {}) as JsonLike;
-  if (info.total_token_usage || info.last_token_usage) return 'codex';
-  if (obj.message && typeof obj.message === 'object') return 'claude';
-  if (obj.requestId || obj.costUSD || obj.sessionId) return 'claude';
-  return 'unknown';
+  return null;
 }
 
-function detectToolFromLines(lines: string[]): Tool {
-  const maxLinesToScan = Math.min(lines.length, 50);
-  for (let i = 0; i < maxLinesToScan; i++) {
-    const obj = safeParse(lines[i]);
-    if (!obj) continue;
-    const detected = detectLineTool(obj);
-    if (detected !== 'unknown') return detected;
+function parseLineObjects(line: string): JsonLike[] {
+  const raw = line.trim();
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw.replace(/^\uFEFF/, ''));
+    if (Array.isArray(parsed)) {
+      return parsed.filter((v) => v && typeof v === 'object' && !Array.isArray(v)) as JsonLike[];
+    }
+    if (parsed && typeof parsed === 'object') return [parsed as JsonLike];
+  } catch {
+    // ignore malformed line
   }
-  return 'unknown';
+  return [];
 }
 
 function getProjectFromCwd(cwd: unknown): string {
@@ -85,46 +75,169 @@ function getProjectFromCwd(cwd: unknown): string {
   return idx >= 0 ? normalized.slice(idx + 1) : normalized;
 }
 
-function dedupeKeyForClaude(obj: JsonLike): string | null {
-  const message = (obj.message ?? {}) as JsonLike;
-  const messageId = message.id;
-  const requestId = obj.requestId;
-  if (typeof messageId === 'string' && typeof requestId === 'string') {
-    return `${messageId}:${requestId}`;
+function getStringByPath(obj: JsonLike | null, paths: string[][]): string {
+  if (!obj) return '';
+  for (const segments of paths) {
+    let cur: unknown = obj;
+    for (const seg of segments) {
+      if (!cur || typeof cur !== 'object' || Array.isArray(cur)) {
+        cur = null;
+        break;
+      }
+      cur = (cur as JsonLike)[seg];
+    }
+    if (typeof cur === 'string' && cur.trim()) return cur.trim();
   }
-  return null;
+  return '';
+}
+
+function getNumberByPath(obj: JsonLike | null, paths: string[][]): number {
+  if (!obj) return 0;
+  for (const segments of paths) {
+    let cur: unknown = obj;
+    for (const seg of segments) {
+      if (!cur || typeof cur !== 'object' || Array.isArray(cur)) {
+        cur = null;
+        break;
+      }
+      cur = (cur as JsonLike)[seg];
+    }
+    const n = toNumber(cur);
+    if (n !== 0) return n;
+    if (cur != null && (typeof cur === 'string' || typeof cur === 'number')) return n;
+  }
+  return 0;
+}
+
+function detectLineTool(obj: JsonLike): Tool {
+  const type = String(obj.type ?? '').toLowerCase();
+  const payload = toRecord(obj.payload) ?? {};
+  const payloadType = String(payload.type ?? '').toLowerCase();
+  const info = toRecord(payload.info);
+
+  if (type === 'session_meta' || type === 'turn_context' || type === 'response_item') return 'codex';
+  if (type === 'event_msg') {
+    if (
+      payloadType === 'token_count' ||
+      payloadType === 'user_message' ||
+      payloadType === 'agent_message' ||
+      payloadType === 'agent_reasoning'
+    ) {
+      return 'codex';
+    }
+  }
+
+  if (info && (info.total_token_usage != null || info.last_token_usage != null)) return 'codex';
+
+  const message = toRecord(obj.message);
+  if (message) {
+    const usage = toRecord(message.usage);
+    if (usage) return 'claude';
+  }
+
+  if (obj.requestId != null || obj.costUSD != null || obj.sessionId != null) return 'claude';
+  return 'unknown';
+}
+
+function detectToolFromEntries(entries: ParsedEntry[]): Tool {
+  let codex = 0;
+  let claude = 0;
+  const max = Math.min(entries.length, 300);
+
+  for (let i = 0; i < max; i++) {
+    const t = detectLineTool(entries[i].obj);
+    if (t === 'codex') codex += 1;
+    if (t === 'claude') claude += 1;
+  }
+
+  if (codex === 0 && claude === 0) return 'unknown';
+  return codex >= claude ? 'codex' : 'claude';
+}
+
+function flattenJsonl(fileText: string): ParsedEntry[] {
+  const lines = fileText.split(/\r?\n/);
+  const out: ParsedEntry[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const objects = parseLineObjects(lines[i]);
+    for (const obj of objects) {
+      out.push({ obj, lineIndex: i });
+    }
+  }
+  return out;
+}
+
+function dedupeKeyForClaude(obj: JsonLike): string {
+  const message = toRecord(obj.message);
+  const messageId = getStringByPath(message, [['id']]);
+  const requestId = getStringByPath(obj, [['requestId'], ['request_id']]);
+  if (messageId && requestId) return `mid:${messageId}:rid:${requestId}`;
+  if (requestId) return `rid:${requestId}`;
+  return '';
 }
 
 function normalizeClaudeLine(params: {
-  obj: JsonLike;
+  entry: ParsedEntry;
   sourceFile: string;
   sourceRoot: string;
   options: ParseOptions;
   seen: Set<string>;
-  index: number;
 }): NormalizedEvent | null {
-  const { obj, sourceFile, sourceRoot, options, seen, index } = params;
-  const message = (obj.message ?? {}) as JsonLike;
-  const usage = (message.usage ?? {}) as JsonLike;
+  const { entry, sourceFile, sourceRoot, options, seen } = params;
+  const obj = entry.obj;
+  const message = toRecord(obj.message);
+
+  const usage =
+    toRecord(message?.usage) ??
+    toRecord(obj.usage) ??
+    toRecord((toRecord(obj.result) ?? {})['usage']) ??
+    toRecord((toRecord(obj.response) ?? {})['usage']);
+
+  if (!usage) return null;
 
   const dedupe = dedupeKeyForClaude(obj);
-  if (dedupe && seen.has(dedupe)) return null;
-  if (dedupe) seen.add(dedupe);
+  if (dedupe) {
+    if (seen.has(dedupe)) return null;
+    seen.add(dedupe);
+  }
 
   const timestamp =
-    (typeof obj.timestamp === 'string' && obj.timestamp) ||
-    (typeof message.timestamp === 'string' && message.timestamp) ||
+    getStringByPath(obj, [
+      ['timestamp'],
+      ['created_at'],
+      ['createdAt'],
+      ['time'],
+      ['datetime'],
+    ]) ||
+    getStringByPath(message, [['timestamp'], ['created_at'], ['createdAt']]) ||
     new Date().toISOString();
 
-  const inputTokens = toNumber(usage.input_tokens);
-  const outputTokens = toNumber(usage.output_tokens);
-  const cacheCreationTokens = toNumber(usage.cache_creation_input_tokens);
-  const cacheReadTokens = toNumber(usage.cache_read_input_tokens);
+  const inputTokens = getNumberByPath(usage, [
+    ['input_tokens'],
+    ['inputTokens'],
+  ]);
+  const outputTokens = getNumberByPath(usage, [
+    ['output_tokens'],
+    ['outputTokens'],
+  ]);
+  const cacheCreationTokens = getNumberByPath(usage, [
+    ['cache_creation_input_tokens'],
+    ['cacheCreationInputTokens'],
+    ['cache_creation_tokens'],
+  ]);
+  const cacheReadTokens = getNumberByPath(usage, [
+    ['cache_read_input_tokens'],
+    ['cacheReadInputTokens'],
+    ['cache_read_tokens'],
+  ]);
+
   const totalTokens = inputTokens + outputTokens + cacheCreationTokens + cacheReadTokens;
+  const observedCostUSD = getNumberByPath(obj, [['costUSD'], ['cost_usd'], ['cost']]);
+  if (totalTokens <= 0 && observedCostUSD <= 0) return null;
 
-  if (totalTokens <= 0 && !obj.costUSD) return null;
+  const model =
+    getStringByPath(message, [['model'], ['model_name']]) ||
+    getStringByPath(obj, [['model'], ['model_name'], ['modelName']]);
 
-  const model = typeof message.model === 'string' ? message.model : '';
   const pricing = resolvePricing(options.pricingCatalog, model, 'claude');
   const calculatedCostUSD = calculateCostFromTokens({
     tool: 'claude',
@@ -136,12 +249,10 @@ function normalizeClaudeLine(params: {
     cacheReadTokens,
   });
 
-  const observedCostUSD = toNumber(obj.costUSD);
-  const costMode = options.costMode;
   const effectiveCostUSD =
-    costMode === 'display'
+    options.costMode === 'display'
       ? observedCostUSD
-      : costMode === 'calculate'
+      : options.costMode === 'calculate'
       ? calculatedCostUSD
       : observedCostUSD > 0
       ? observedCostUSD
@@ -150,7 +261,7 @@ function normalizeClaudeLine(params: {
   const profile = options.profileResolver.resolve('claude', sourceRoot);
 
   return {
-    id: `claude-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    id: `claude-${entry.lineIndex}-${Math.random().toString(36).slice(2, 8)}`,
     timestampUtc: timestamp,
     dateLocal: toDateLabel(timestamp, options.timezone),
     tool: 'claude',
@@ -159,8 +270,14 @@ function normalizeClaudeLine(params: {
     isProfilexManaged: profile.isProfilexManaged,
     sourceRoot,
     sourceFile,
-    sessionId: typeof obj.sessionId === 'string' ? obj.sessionId : '',
-    project: getProjectFromCwd(obj.cwd),
+    sessionId:
+      getStringByPath(obj, [['sessionId'], ['session_id']]) ||
+      sourceFile.replace(/\.jsonl$/i, '').split('/').pop() ||
+      '',
+    project:
+      getProjectFromCwd(obj.cwd) ||
+      sourceFile.split('/').slice(-2, -1)[0] ||
+      '',
     model,
     isFallbackModel: false,
     inputTokens,
@@ -186,15 +303,22 @@ type Totals = {
   total_tokens: number;
 };
 
-function extractUsage(obj: unknown): Totals | null {
-  if (!obj || typeof obj !== 'object') return null;
-  const rec = obj as JsonLike;
-  const input = toNumber(rec.input_tokens);
-  const cached = toNumber(rec.cached_input_tokens ?? rec.cache_read_input_tokens);
-  const output = toNumber(rec.output_tokens);
-  const reasoning = toNumber(rec.reasoning_output_tokens);
-  const total = toNumber(rec.total_tokens) || input + output;
+function extractUsage(value: unknown): Totals | null {
+  const rec = toRecord(value);
+  if (!rec) return null;
+
+  const input = getNumberByPath(rec, [['input_tokens'], ['inputTokens']]);
+  const cached = getNumberByPath(rec, [
+    ['cached_input_tokens'],
+    ['cache_read_input_tokens'],
+    ['cachedInputTokens'],
+  ]);
+  const output = getNumberByPath(rec, [['output_tokens'], ['outputTokens']]);
+  const reasoning = getNumberByPath(rec, [['reasoning_output_tokens'], ['reasoningOutputTokens']]);
+  const total = getNumberByPath(rec, [['total_tokens'], ['totalTokens']]) || input + output;
+
   if (input === 0 && cached === 0 && output === 0 && total === 0) return null;
+
   return {
     input_tokens: input,
     cached_input_tokens: cached,
@@ -209,61 +333,95 @@ function minus(a: Totals, b: Totals | null): Totals {
     input_tokens: Math.max(a.input_tokens - (b?.input_tokens ?? 0), 0),
     cached_input_tokens: Math.max(a.cached_input_tokens - (b?.cached_input_tokens ?? 0), 0),
     output_tokens: Math.max(a.output_tokens - (b?.output_tokens ?? 0), 0),
-    reasoning_output_tokens: Math.max(
-      a.reasoning_output_tokens - (b?.reasoning_output_tokens ?? 0),
-      0,
-    ),
+    reasoning_output_tokens: Math.max(a.reasoning_output_tokens - (b?.reasoning_output_tokens ?? 0), 0),
     total_tokens: Math.max(a.total_tokens - (b?.total_tokens ?? 0), 0),
   };
 }
 
-function extractCodexModel(payload: JsonLike, currentModel: string | null): { model: string; fallback: boolean } {
-  const directModel = payload.model;
-  if (typeof directModel === 'string' && directModel) return { model: directModel, fallback: false };
+function extractCodexModelFromAny(value: unknown): string {
+  const rec = toRecord(value);
+  if (!rec) return '';
 
-  const info = (payload.info ?? {}) as JsonLike;
-  const metadata = (info.metadata ?? {}) as JsonLike;
-  if (typeof metadata.model === 'string' && metadata.model) return { model: metadata.model, fallback: false };
+  const direct = getStringByPath(rec, [['model'], ['model_name']]);
+  if (direct) return direct;
 
-  if (currentModel) return { model: currentModel, fallback: false };
-  return { model: 'gpt-5', fallback: true };
+  const info = toRecord(rec.info);
+  if (info) {
+    const fromInfo = getStringByPath(info, [['model'], ['model_name']]);
+    if (fromInfo) return fromInfo;
+
+    const infoMeta = toRecord(info.metadata);
+    if (infoMeta) {
+      const fromInfoMeta =
+        getStringByPath(infoMeta, [['model']]) ||
+        getStringByPath(toRecord(infoMeta.output), [['model']]);
+      if (fromInfoMeta) return fromInfoMeta;
+    }
+  }
+
+  const meta = toRecord(rec.metadata);
+  if (meta) {
+    const fromMeta = getStringByPath(meta, [['model']]) || getStringByPath(toRecord(meta.output), [['model']]);
+    if (fromMeta) return fromMeta;
+  }
+
+  const item = toRecord(rec.item);
+  if (item) {
+    const fromItem = getStringByPath(item, [['model'], ['model_name']]);
+    if (fromItem) return fromItem;
+    const itemMeta = toRecord(item.metadata);
+    if (itemMeta) {
+      const fromItemMeta = getStringByPath(itemMeta, [['model']]) || getStringByPath(toRecord(itemMeta.output), [['model']]);
+      if (fromItemMeta) return fromItemMeta;
+    }
+  }
+
+  return '';
 }
 
-function normalizeCodexFile(params: {
-  lines: string[];
+function normalizeCodexEntries(params: {
+  entries: ParsedEntry[];
   sourceFile: string;
   sourceRoot: string;
   options: ParseOptions;
 }): NormalizedEvent[] {
-  const { lines, sourceFile, sourceRoot, options } = params;
+  const { entries, sourceFile, sourceRoot, options } = params;
   const out: NormalizedEvent[] = [];
-
-  let previousTotals: Totals | null = null;
-  let currentModel: string | null = null;
-  const sessionId = sourceFile.replace(/\.jsonl$/i, '').split('/').pop() ?? '';
   const profile = options.profileResolver.resolve('codex', sourceRoot);
 
-  for (let i = 0; i < lines.length; i++) {
-    const obj = safeParse(lines[i]);
-    if (!obj) continue;
+  let previousTotals: Totals | null = null;
+  let currentModel = '';
+  let currentModelIsFallback = false;
 
-    const type = String(obj.type ?? '');
-    const payload = ((obj.payload ?? {}) as JsonLike) || {};
+  const inferredSession = sourceFile.replace(/\.jsonl$/i, '').split('/').pop() || '';
 
-    if (type === 'turn_context') {
-      if (typeof payload.model === 'string' && payload.model) currentModel = payload.model;
+  for (const entry of entries) {
+    const obj = entry.obj;
+    const type = String(obj.type ?? '').toLowerCase();
+    const payload = toRecord(obj.payload) ?? {};
+
+    if (type === 'turn_context' || type === 'session_meta' || type === 'response_item') {
+      const modelFromContext = extractCodexModelFromAny(payload) || extractCodexModelFromAny(obj);
+      if (modelFromContext) {
+        currentModel = modelFromContext;
+        currentModelIsFallback = false;
+      }
       continue;
     }
 
-    if (type !== 'event_msg' || String(payload.type ?? '') !== 'token_count') continue;
+    if (type !== 'event_msg') continue;
 
-    const info = (payload.info ?? {}) as JsonLike;
-    const last = extractUsage(info.last_token_usage);
-    const total = extractUsage(info.total_token_usage);
+    const payloadType = String(payload.type ?? '').toLowerCase();
+    if (payloadType !== 'token_count') continue;
 
-    const usage = last ?? (total ? minus(total, previousTotals) : null);
+    const info = toRecord(payload.info) ?? {};
+
+    const lastUsage = extractUsage(info.last_token_usage ?? payload.last_token_usage);
+    const totalUsage = extractUsage(info.total_token_usage ?? payload.total_token_usage);
+
+    const usage = lastUsage ?? (totalUsage ? minus(totalUsage, previousTotals) : null);
     if (!usage) continue;
-    if (total) previousTotals = total;
+    if (totalUsage) previousTotals = totalUsage;
 
     if (
       usage.input_tokens === 0 &&
@@ -274,11 +432,27 @@ function normalizeCodexFile(params: {
       continue;
     }
 
-    const timestamp =
-      (typeof obj.timestamp === 'string' && obj.timestamp) || new Date().toISOString();
+    let model =
+      extractCodexModelFromAny({ ...payload, info }) ||
+      extractCodexModelFromAny(info) ||
+      currentModel;
 
-    const modelInfo = extractCodexModel(payload, currentModel);
-    currentModel = modelInfo.model;
+    let fallback = false;
+    if (!model) {
+      model = 'gpt-5';
+      fallback = true;
+      currentModelIsFallback = true;
+    } else if (!extractCodexModelFromAny({ ...payload, info }) && currentModelIsFallback) {
+      fallback = true;
+    } else {
+      currentModelIsFallback = false;
+    }
+    currentModel = model;
+
+    const timestamp =
+      getStringByPath(obj, [['timestamp'], ['created_at'], ['createdAt']]) ||
+      getStringByPath(payload, [['timestamp']]) ||
+      new Date().toISOString();
 
     const inputTokens = usage.input_tokens;
     const cachedInputTokens = Math.min(usage.cached_input_tokens, usage.input_tokens);
@@ -286,7 +460,7 @@ function normalizeCodexFile(params: {
     const reasoningOutputTokens = usage.reasoning_output_tokens;
     const totalTokens = usage.total_tokens > 0 ? usage.total_tokens : inputTokens + outputTokens;
 
-    const pricing = resolvePricing(options.pricingCatalog, modelInfo.model, 'codex');
+    const pricing = resolvePricing(options.pricingCatalog, model, 'codex');
     const calculatedCostUSD = calculateCostFromTokens({
       tool: 'codex',
       pricing,
@@ -297,8 +471,15 @@ function normalizeCodexFile(params: {
       cacheReadTokens: 0,
     });
 
+    const effectiveCostUSD =
+      options.costMode === 'display'
+        ? 0
+        : options.costMode === 'calculate'
+        ? calculatedCostUSD
+        : calculatedCostUSD;
+
     out.push({
-      id: `codex-${i}-${Math.random().toString(36).slice(2, 8)}`,
+      id: `codex-${entry.lineIndex}-${Math.random().toString(36).slice(2, 8)}`,
       timestampUtc: timestamp,
       dateLocal: toDateLabel(timestamp, options.timezone),
       tool: 'codex',
@@ -307,10 +488,13 @@ function normalizeCodexFile(params: {
       isProfilexManaged: profile.isProfilexManaged,
       sourceRoot,
       sourceFile,
-      sessionId,
-      project: '',
-      model: modelInfo.model,
-      isFallbackModel: modelInfo.fallback,
+      sessionId:
+        getStringByPath(obj, [['session_id'], ['sessionId']]) ||
+        getStringByPath(payload, [['session_id'], ['sessionId']]) ||
+        inferredSession,
+      project: sourceFile.split('/').slice(-3, -2)[0] || '',
+      model,
+      isFallbackModel: fallback,
       inputTokens,
       cachedInputTokens,
       outputTokens,
@@ -321,12 +505,7 @@ function normalizeCodexFile(params: {
       normalizedTotalTokens: totalTokens,
       observedCostUSD: 0,
       calculatedCostUSD,
-      effectiveCostUSD:
-        options.costMode === 'display'
-          ? 0
-          : options.costMode === 'calculate'
-          ? calculatedCostUSD
-          : calculatedCostUSD,
+      effectiveCostUSD,
       costModeUsed: options.costMode,
     });
   }
@@ -340,33 +519,35 @@ export function parseUsageFile(params: {
   options: ParseOptions;
 }): NormalizedEvent[] {
   const { fileText, filePath, options } = params;
-  const lines = fileText.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
-  if (lines.length === 0) return [];
+  const entries = flattenJsonl(fileText);
+  if (entries.length === 0) return [];
 
   const inferredFromPath = inferToolFromPath(filePath);
-  const inferredFromLine = detectToolFromLines(lines);
-  const tool = options.toolHint !== 'auto' ? options.toolHint : inferredFromLine !== 'unknown' ? inferredFromLine : inferredFromPath;
+  const inferredFromLine = detectToolFromEntries(entries);
+  const tool =
+    options.toolHint !== 'auto'
+      ? options.toolHint
+      : inferredFromLine !== 'unknown'
+      ? inferredFromLine
+      : inferredFromPath;
 
-  const root = extractRootFromFile(filePath, tool);
+  const sourceRoot = extractRootFromFile(filePath, tool);
 
   if (tool === 'codex') {
-    return normalizeCodexFile({ lines, sourceFile: filePath, sourceRoot: root, options });
+    return normalizeCodexEntries({ entries, sourceFile: filePath, sourceRoot, options });
   }
 
-  const out: NormalizedEvent[] = [];
   const seen = new Set<string>();
-  for (let i = 0; i < lines.length; i++) {
-    const obj = safeParse(lines[i]);
-    if (!obj) continue;
+  const rows: NormalizedEvent[] = [];
+  for (const entry of entries) {
     const row = normalizeClaudeLine({
-      obj,
+      entry,
       sourceFile: filePath,
-      sourceRoot: root,
+      sourceRoot,
       options,
       seen,
-      index: i,
     });
-    if (row) out.push(row);
+    if (row) rows.push(row);
   }
-  return out;
+  return rows;
 }

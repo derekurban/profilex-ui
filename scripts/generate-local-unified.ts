@@ -173,30 +173,44 @@ function addIfPresent(set: Set<string>, candidate: string) {
   set.add(toPosixAbsolute(candidate));
 }
 
+function parsePathList(input?: string): string[] {
+  if (!input) return [];
+  return input
+    .split(',')
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .map((p) => expandHome(p));
+}
+
+function ensureLeaf(basePath: string, leaf: 'projects' | 'sessions'): string {
+  const normalized = normalizePath(basePath).toLowerCase();
+  if (normalized.endsWith(`/${leaf}`)) return basePath;
+  return path.join(basePath, leaf);
+}
+
 function getUsageRoots(state: ProfilexState | null): string[] {
   const home = os.homedir();
   const out = new Set<string>();
 
-  const claudeEnv = process.env.CLAUDE_CONFIG_DIR ? expandHome(process.env.CLAUDE_CONFIG_DIR) : '';
-  const codexEnv = process.env.CODEX_HOME ? expandHome(process.env.CODEX_HOME) : '';
+  const claudeEnvPaths = parsePathList(process.env.CLAUDE_CONFIG_DIR);
+  const codexEnvPaths = parsePathList(process.env.CODEX_HOME);
 
   addIfPresent(out, path.join(home, '.config', 'claude', 'projects'));
   addIfPresent(out, path.join(home, '.claude', 'projects'));
-  if (claudeEnv) addIfPresent(out, path.join(claudeEnv, 'projects'));
+  for (const p of claudeEnvPaths) {
+    addIfPresent(out, ensureLeaf(p, 'projects'));
+  }
 
   addIfPresent(out, path.join(home, '.codex', 'sessions'));
-  if (codexEnv) addIfPresent(out, path.join(codexEnv, 'sessions'));
+  for (const p of codexEnvPaths) {
+    addIfPresent(out, ensureLeaf(p, 'sessions'));
+  }
 
   if (state) {
     for (const profile of state.profiles) {
       const base = expandHome(profile.dir);
-      const normalizedBase = normalizePath(base).toLowerCase();
-      const expectedLeaf = profile.tool === 'claude' ? '/projects' : '/sessions';
-      if (normalizedBase.endsWith(expectedLeaf)) {
-        addIfPresent(out, base);
-      } else {
-        addIfPresent(out, path.join(base, expectedLeaf.slice(1)));
-      }
+      const leaf = profile.tool === 'claude' ? 'projects' : 'sessions';
+      addIfPresent(out, ensureLeaf(base, leaf));
     }
   }
 
