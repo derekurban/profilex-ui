@@ -105,16 +105,14 @@ On app boot, the UI checks for `public/local-unified-usage.json`:
 
 ### Multi-machine aggregation (work laptop + desktop)
 
-1. (Recommended) Configure Syncthing-targeted exports on each machine:
+1. On each machine, run:
 
 ```bash
-profilex sync init --provider syncthing --dir ~/Sync/profilex-usage --machine <machine-name>
-profilex sync export --deep
+profilex usage export --out ./local-unified-usage.<machine>.json --deep
 ```
 
-This writes `local-unified-usage.<machine-name>.json` into your synced folder.
-
-2. In ProfileX-UI, use **Import ProfileX usage bundle(s) (.json)** and select all machine bundles.
+2. Move those JSON files to your main machine.
+3. In ProfileX-UI, use **Import ProfileX usage bundle(s) (.json)** and select all of them.
 
 The UI merges events and profile metadata across bundles.
 
