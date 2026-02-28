@@ -53,6 +53,10 @@ export type NormalizedEvent = {
   calculatedCostUSD: number;
   effectiveCostUSD: number;
   costModeUsed: 'auto' | 'calculate' | 'display';
+  isSharedSession: boolean;
+  sharedSessionProfileIds: string[];
+  sharedSessionProfileNames: string[];
+  sharedSessionSources: string[];
 };
 
 export type AggregatedRow = {
@@ -113,3 +117,56 @@ export type UnifiedLocalBundle = {
   source: UnifiedSourceSummary;
   notes: string[];
 };
+
+// --- Chart & Dashboard Types ---
+
+export type TimeBucket = 'daily' | 'weekly' | 'monthly';
+
+export type TimeSeriesPoint = {
+  date: string;
+  values: Record<string, number>;
+};
+
+export type ModelBreakdown = {
+  model: string;
+  cost: number;
+  tokens: number;
+  percentage: number;
+};
+
+export type TokenTypeBreakdown = {
+  date: string;
+  input: number;
+  output: number;
+  cached: number;
+  reasoning: number;
+  cacheCreation: number;
+  cacheRead: number;
+};
+
+export type KpiData = {
+  totalTokens: number;
+  effectiveCost: number;
+  eventCount: number;
+  sessionCount: number;
+  modelCount: number;
+  avgDailyCost: number;
+  sharedSessionCount: number;
+  trends: {
+    tokens: number;
+    cost: number;
+    events: number;
+  };
+};
+
+export type SortDirection = 'asc' | 'desc';
+
+export type ColumnDef<T = Record<string, unknown>> = {
+  key: string;
+  label: string;
+  align?: 'left' | 'right' | 'center';
+  format?: (value: unknown, row: T) => string;
+  sortable?: boolean;
+};
+
+export type SharedSessionFilter = 'all' | 'shared-only' | 'non-shared-only';

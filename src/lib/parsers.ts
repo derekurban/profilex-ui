@@ -292,6 +292,10 @@ function normalizeClaudeLine(params: {
     calculatedCostUSD,
     effectiveCostUSD,
     costModeUsed: options.costMode,
+    isSharedSession: false,
+    sharedSessionProfileIds: [],
+    sharedSessionProfileNames: [],
+    sharedSessionSources: [],
   };
 }
 
@@ -507,6 +511,10 @@ function normalizeCodexEntries(params: {
       calculatedCostUSD,
       effectiveCostUSD,
       costModeUsed: options.costMode,
+      isSharedSession: false,
+      sharedSessionProfileIds: [],
+      sharedSessionProfileNames: [],
+      sharedSessionSources: [],
     });
   }
 
